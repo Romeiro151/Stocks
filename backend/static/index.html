@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Terminal Bloomberg API</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #121212; color: #e0e0e0; margin: 0; padding: 20px; }
+        .container { max-width: 900px; margin: 0 auto; }
+        h1 { color: #4caf50; text-align: center; border-bottom: 2px solid #333; padding-bottom: 10px; }
+        .search-box { display: flex; gap: 10px; margin-bottom: 30px; justify-content: center; }
+        input { padding: 10px; font-size: 16px; border: none; border-radius: 5px; outline: none; background-color: #2c2c2c; color: white; width: 250px; }
+        button { padding: 10px 20px; font-size: 16px; background-color: #4caf50; color: white; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; }
+        button:hover { background-color: #45a049; }
+        .card { background-color: #1e1e1e; padding: 20px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); }
+        .card h2 { color: #2196f3; margin-top: 0; }
+        .data-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; }
+        .data-item strong { color: #888; display: block; font-size: 12px; text-transform: uppercase; }
+        .data-item span { font-size: 18px; font-weight: bold; }
+        .hidden { display: none; }
+        .loading { text-align: center; color: #ffeb3b; font-weight: bold; margin-top: 20px; }
+        .chart-container { position: relative; height: 300px; width: 100%; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>Terminal Financeiro</h1>
+    
+    <div class="search-box">
+        <input type="text" id="tickerInput" placeholder="Símbolo (Ex: AAPL, MSFT)" onkeypress="if(event.key === 'Enter') searchData()">
+        <button onclick="searchData()">Pesquisar</button>
+    </div>
+
+    <div id="loadingMsg" class="loading hidden">A procurar dados nos mercados...</div>
+
+    <div id="quoteCard" class="card hidden">
+        <h2>📊 Dados em Tempo Real</h2>
+        <div class="data-grid" id="quoteData"></div>
+    </div>
+
+    <div id="chartCard" class="card hidden">
+        <h2>📈 Histórico de Preços (30 Dias)</h2>
+        <div class="chart-container">
+            <canvas id="priceChart"></canvas>
+        </div>
+    </div>
+
+    <div id="aiCard" class="card hidden">
+        <h2>🤖 Análise IA das Notícias</h2>
+        <div id="aiData"></div>
+    </div>
+</div>
+
+<script>
+    let myChart = null; 
+    let autoRefresh = null; 
+
+    async function searchData() {
+        // 1. Receber os nomes e separar por vírgulas (Ex: "TSLA, NVDA" vira ["TSLA", "NVDA"])
+        const inputText = document.getElementById('tickerInput').value.trim().toUpperCase();
+        if (!inputText) {
+            alert("Por favor, insere um símbolo de empresa válido!");
+            return;
+        }
+
+        // Limpa o Auto-Refresh antigo se existir
+        if (autoRefresh) clearInterval(autoRefresh);
+
+        // Separa as ações e remove espaços vazios
+        const tickers = inputText.split(',').map(t => t.trim()).filter(t => t !== "");
+
+        document.getElementById('loadingMsg').classList.remove('hidden');
+        document.getElementById('quoteCard').classList.add('hidden');
+        document.getElementById('chartCard').classList.add('hidden');
+        document.getElementById('aiCard').classList.add('hidden');
+
+        try {
+            // ==========================================
+            // 1. COTAÇÕES (Várias em simultâneo!)
+            // ==========================================
+            // Pede os dados de todas as ações ao mesmo tempo
+            const quotePromises = tickers.map(t => fetch(`/quote/${t}`).then(res => res.json()));
+            const quotes = await Promise.all(quotePromises);
+
+            let quotesHTML = "";
+            quotes.forEach(quoteInfo => {
+                // Se der erro numa das ações (ex: não existe), salta para a próxima
+                if(quoteInfo.detail) return; 
+
+                quotesHTML += `
+                    <div style="border-left: 4px solid #4caf50; padding-left: 15px; margin-bottom: 25px; background: #222; padding: 15px; border-radius: 5px;">
+                        <h3 style="margin: 0 0 15px 0; color: #4caf50; font-size: 22px;">🏢 ${quoteInfo.company}</h3>
+                        <div class="data-grid">
+                            <div class="data-item"><strong>Preço Atual</strong><span style="color: #4caf50;">$${quoteInfo.current_price}</span></div>
+                            <div class="data-item"><strong>Market Cap</strong><span>$${quoteInfo.market_cap ? quoteInfo.market_cap.toLocaleString('pt-PT') : 'N/A'}</span></div>
+                            <div class="data-item"><strong>Fecho Anterior</strong><span>$${quoteInfo.previous_close}</span></div>
+                            <div class="data-item"><strong>Dividend Yield</strong><span>${quoteInfo.dividend_yield || 'N/A'}</span></div>
+                        </div>
+                    </div>
+                `;
+            });
+            document.getElementById('quoteData').innerHTML = quotesHTML;
+            document.getElementById('quoteCard').classList.remove('hidden');
+
+
+            // ==========================================
+            // 2. GRÁFICO HISTÓRICO (Comparador Multilinha)
+            // ==========================================
+            const historyPromises = tickers.map(t => fetch(`/history/${t}`).then(res => res.json()));
+            const histories = await Promise.all(historyPromises);
+            
+            const chartColors = ['#2196f3', '#f44336', '#ffeb3b', '#9c27b0', '#ff9800']; // Cores para as várias linhas
+            let datasets = [];
+            let chartDates = [];
+
+            histories.forEach((historyInfo, index) => {
+                if (!historyInfo.data || historyInfo.detail) return;
+                
+                // Guardar as datas apenas da primeira ação para usar no eixo X
+                if (chartDates.length === 0) {
+                    chartDates = historyInfo.data.map(item => item.date || item.Date || Object.values(item)[0]);
+                }
+                
+                // Extrair os preços desta ação
+                const chartPrices = historyInfo.data.map(item => item.close || item.Close || item.preco || Object.values(item)[1]);
+                
+                // Adicionar uma linha nova ao gráfico
+                datasets.push({
+                    label: `${tickers[index]} ($)`,
+                    data: chartPrices,
+                    borderColor: chartColors[index % chartColors.length],
+                    backgroundColor: 'transparent',
+                    borderWidth: 2,
+                    pointRadius: 1,
+                    tension: 0.1
+                });
+            });
+
+            const ctx = document.getElementById('priceChart').getContext('2d');
+            if (myChart) myChart.destroy();
+
+            myChart = new Chart(ctx, {
+                type: 'line',
+                data: { labels: chartDates, datasets: datasets },
+                options: {
+                    responsive: true, maintainAspectRatio: false,
+                    scales: {
+                        x: { ticks: { color: '#888' }, grid: { color: '#333' } },
+                        y: { ticks: { color: '#888' }, grid: { color: '#333' } }
+                    },
+                    plugins: { legend: { labels: { color: '#e0e0e0', font: {size: 14} } } }
+                }
+            });
+            document.getElementById('chartCard').classList.remove('hidden');
+
+
+            // ==========================================
+            // 3. ANÁLISE IA (Apenas para a 1ª ação)
+            // ==========================================
+            const firstTicker = tickers[0];
+            const aiResponse = await fetch(`/news/${firstTicker}`);
+            if (aiResponse.ok) {
+                const aiInfo = await aiResponse.json();
+                
+                let newsHTML = "";
+                if(aiInfo.analysis) {
+                    aiInfo.analysis.forEach(news => {
+                        let color = (news.feeling === "POSITIVE" || news.feeling === "BULLISH") ? "#4caf50" : 
+                                   (news.feeling === "NEGATIVE" || news.feeling === "BEARISH") ? "#f44336" : "#ffeb3b";
+                        
+                        newsHTML += `
+                            <div style="background: #2a2a2a; padding: 12px; margin-top: 10px; border-left: 5px solid ${color}; border-radius: 4px;">
+                                <strong style="color: #fff; font-size: 15px;">${news.title}</strong><br>
+                                <div style="font-size: 13px; color: #aaa; margin-top: 5px;">
+                                    Sentimento: <strong style="color: ${color};">${news.feeling}</strong> (${news.confidence}%) | Fonte: ${news.editor}
+                                </div>
+                                <a href="${news.link}" target="_blank" style="color: #2196f3; font-size: 13px; text-decoration: none; display: inline-block; margin-top: 5px;">Ler Artigo Completo ↗</a>
+                            </div>
+                        `;
+                    });
+                }
+
+                document.getElementById('aiData').innerHTML = `
+                    <p style="color: #888;">Mostrando notícias para a ação principal: <strong>${firstTicker}</strong></p>
+                    <p><strong>Sentimento Geral do Mercado:</strong> <span style="font-size: 18px; font-weight: bold; color: #e0e0e0;">${aiInfo.overall_feeling || 'N/A'}</span></p>
+                    <div style="max-height: 400px; overflow-y: auto; padding-right: 10px;">${newsHTML}</div>
+                `;
+                document.getElementById('aiCard').classList.remove('hidden');
+            }
+
+            // Inicia o Auto-Refresh (A cada 60 segundos atualiza tudo!)
+            autoRefresh = setInterval(searchData, 60000);
+
+        } catch (error) {
+            console.error(error); // Esconde o alert feio e mete o erro no console
+        } finally {
+            document.getElementById('loadingMsg').classList.add('hidden');
+        }
+    }
+</script>
+
+</body>
+</html>
